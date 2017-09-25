@@ -34,8 +34,7 @@ from beets.autotag import hooks
 from beets import plugins
 from beets import importer
 from beets import util
-from beets.util import syspath, normpath, ancestry, displayable_path, \
-    MoveOperation
+from beets.util import syspath, normpath, ancestry, displayable_path
 from beets import library
 from beets import config
 from beets import logging
@@ -1331,7 +1330,7 @@ default_commands.append(version_cmd)
 
 # modify: Declaratively change metadata.
 
-def modify_items(lib, mods, dels, query, write, move, album, confirm):
+def modify_items(lib, mods, addset, delset, dels, query, write, move, album, confirm):
     """Modifies matching items according to user-specified assignments and
     deletions.
 
@@ -1354,7 +1353,7 @@ def modify_items(lib, mods, dels, query, write, move, album, confirm):
            .format(len(objs), u'album' if album else u'item'))
     changed = set()
     for obj in objs:
-        if print_and_modify(obj, mods, dels):
+        if print_and_modify(obj, mods, addset, delset, dels):
             changed.add(obj)
 
     # Still something to do?
@@ -1384,14 +1383,38 @@ def modify_items(lib, mods, dels, query, write, move, album, confirm):
             obj.try_sync(write, move)
 
 
-def print_and_modify(obj, mods, dels):
+def print_and_modify(obj, mods, addset, delset, dels):
     """Print the modifications to an item and return a bool indicating
     whether any changes were made.
 
     `mods` is a dictionary of fields and values to update on the object;
     `dels` is a sequence of fields to delete.
     """
+    separator = ';'
+
+    # deal with addition to multi-value fields
+    for field in addset:
+        try:
+            multivalues=obj[field].split(separator)
+            if not addset[field] in multivalues:
+                multivalues.append(addset[field])
+                mods[field] = separator.join(multivalues)
+        except KeyError:
+            # field does not exist yet
+            mods[field] = addset[field]
+
+    # deal with deletion from multi-value fields
+    for field in delset:
+        try:
+            multivalues=obj[field].split(separator)
+            if delset[field] in multivalues:
+                multivalues.remove(delset[field])
+                mods[field] = separator.join(multivalues)
+        except KeyError:
+            pass
+
     obj.update(mods)
+
     for field in dels:
         try:
             del obj[field]
@@ -1402,28 +1425,38 @@ def print_and_modify(obj, mods, dels):
 
 def modify_parse_args(args):
     """Split the arguments for the modify subcommand into query parts,
-    assignments (field=value), and deletions (field!).  Returns the result as
+    assignments (field=value), value addition (field+=value), 
+    value deletion (field-=value),  and deletions (field!).  
+    Returns the result as
     a three-tuple in that order.
     """
     mods = {}
+    addset = {}
+    delset = {}
     dels = []
     query = []
     for arg in args:
         if arg.endswith('!') and '=' not in arg and ':' not in arg:
             dels.append(arg[:-1])  # Strip trailing !.
+        elif '+=' in arg and ':' not in arg.split('+=', 1)[0]:
+            key, val = arg.split('+=', 1)
+            addset[key] = val
+        elif '-=' in arg and ':' not in arg.split('-=', 1)[0]:
+            key, val = arg.split('-=', 1)
+            delset[key] = val
         elif '=' in arg and ':' not in arg.split('=', 1)[0]:
             key, val = arg.split('=', 1)
             mods[key] = val
         else:
             query.append(arg)
-    return query, mods, dels
+    return query, mods, addset, delset, dels
 
 
 def modify_func(lib, opts, args):
-    query, mods, dels = modify_parse_args(decargs(args))
-    if not mods and not dels:
+    query, mods, addset, delset, dels = modify_parse_args(decargs(args))
+    if not mods and not dels and not addset and not delset:
         raise ui.UserError(u'no modifications specified')
-    modify_items(lib, mods, dels, query, ui.should_write(opts.write),
+    modify_items(lib, mods, addset, delset, dels, query, ui.should_write(opts.write),
                  ui.should_move(opts.move), opts.album, not opts.yes)
 
 
@@ -1500,14 +1533,10 @@ def move_items(lib, dest, query, copy, album, pretend, confirm=False,
 
             if export:
                 # Copy without affecting the database.
-                obj.move(operation=MoveOperation.COPY, basedir=dest,
-                         store=False)
+                obj.move(True, basedir=dest, store=False)
             else:
                 # Ordinary move/copy: store the new path.
-                if copy:
-                    obj.move(operation=MoveOperation.COPY, basedir=dest)
-                else:
-                    obj.move(operation=MoveOperation.MOVE, basedir=dest)
+                obj.move(copy, basedir=dest)
 
 
 def move_func(lib, opts, args):
